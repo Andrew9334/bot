@@ -1,0 +1,8 @@
+.env
+session.session
+*.log
+photo.jpg
+video.mp4
+document
+__pycache__/
+venv/
