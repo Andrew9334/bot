@@ -1,5 +1,4 @@
 .env
-session.session
 *.log
 photo.jpg
 video.mp4
