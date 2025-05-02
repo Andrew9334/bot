@@ -2,12 +2,12 @@ import asyncio
 import logging
 import os
 import re
+
 from dotenv import load_dotenv
+from telegram import Bot
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError, ChatWriteForbiddenError, SessionPasswordNeededError
 from telethon.network import ConnectionTcpFull
-from telegram import Bot
-import telethon.errors
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -52,6 +52,7 @@ if not PHONE.startswith("+"):
 # Инициализация бота
 bot = Bot(token=BOT_TOKEN)
 
+
 # Проверка валидности токена
 async def validate_bot_token():
     try:
@@ -70,6 +71,7 @@ async def check_bot_permissions():
         logger.error(f"Бот не может отправить сообщение в чат {DESTINATION_CHAT_ID}:{e}")
         exit(1)
 
+
 # Инициализация клиента Telethon
 client = TelegramClient(
     'session',
@@ -80,16 +82,44 @@ client = TelegramClient(
 
 # Функция для очистки реферальных ссылок
 def clean_referral_links(text):
-    # Регулярное выражение для поиска ссылок вида [текст](URL) с параметром inviteCode или другими реферальными параметрами
-    pattern = r'\[([^\]]*)\]\((https?://[^\s\)]+\?[^#\s]*inviteCode=[^\s\)]*)\)'
-    # Заменяем реферальные ссылки на их текстовую часть
-    cleaned_text = re.sub(pattern, r'\1', text)
-    return cleaned_text
+    """
+    Очищает текст от всех ссылок в различных форматах (Markdown, голые URL, HTML).
+    Удаляет любые URL, включая те, что не содержат явных реферальных параметров.
+    """
+    if not text:
+        logger.debug("Пустой текст, пропускаем обработку")
+        return text
+
+    try:
+        # 1. Markdown-ссылки: [текст](URL) — удаляем любые URL
+        markdown_pattern = r'\[([^\]]*)\]\((https?://[^\s\)]*?)[#\)]?'
+        text = re.sub(markdown_pattern, r'\1', text, flags=re.IGNORECASE)
+
+        # 2. Голые URL: https://example.com/... — удаляем любые URL
+        raw_url_pattern = r'(https?://[^\s]*?)[#]?'
+        text = re.sub(raw_url_pattern, '', text, flags=re.IGNORECASE)
+
+        # 3. HTML-ссылки: <a href="URL">текст</a> — удаляем любые URL
+        html_pattern = r'<a\s+href="(https?://[^\s"]*?)"[^>]*>([^<]*)</a>'
+        text = re.sub(html_pattern, r'\2', text, flags=re.IGNORECASE)
+
+        # Логирование результата
+        if text == text:
+            logger.debug("Ссылки не найдены")
+        else:
+            logger.info("Ссылки удалены")
+
+        return text
+
+    except Exception as e:
+        logger.error(f"Ошибка при очистке ссылок: {e}")
+        return text
 
 # Обработчик новых сообщений
 @client.on(events.NewMessage(chats=CHANNEL_ID))
 async def handler(event):
-    logger.info(f"Новое сообщение в канале, ID: {event.message.id}, Тип: {type(event.message.media).__name__ if event.message.media else 'Text'}")
+    logger.info(
+        f"Новое сообщение в канале, ID: {event.message.id}, Тип: {type(event.message.media).__name__ if event.message.media else 'Text'}")
     for attempt in range(3):
         try:
             if event.message.text:
@@ -98,28 +128,28 @@ async def handler(event):
                 logger.info(f"Получено текстовое сообщение: {cleaned_text}")
                 await bot.send_message(chat_id=DESTINATION_CHAT_ID, text=cleaned_text, parse_mode=None)
                 logger.info(f"Сообщение отправлено в чат {DESTINATION_CHAT_ID}")
-            if event.message.media:
-                if event.message.photo:
-                    logger.info("Получено фото")
-                    file_path = await event.message.download_media(file="photo.jpg")
-                    with open(file_path, "rb") as f:
-                        await bot.send_photo(chat_id=DESTINATION_CHAT_ID, photo=f)
-                    os.remove(file_path)
-                    logger.info(f"Фото отправлено в чат {DESTINATION_CHAT_ID}")
-                elif event.message.video:
-                    logger.info("Получено видео")
-                    file_path = await event.message.download_media(file="video.mp4")
-                    with open(file_path, "rb") as f:
-                        await bot.send_video(chat_id=DESTINATION_CHAT_ID, video=f)
-                    os.remove(file_path)
-                    logger.info(f"Видео отправлено в чат {DESTINATION_CHAT_ID}")
-                elif event.message.document:
-                    logger.info("Получен документ")
-                    file_path = await event.message.download_media(file="document")
-                    with open(file_path, "rb") as f:
-                        await bot.send_document(chat_id=DESTINATION_CHAT_ID, document=f)
-                    os.remove(file_path)
-                    logger.info(f"Документ отправлен в чат {DESTINATION_CHAT_ID}")
+            # if event.message.media:
+            #     if event.message.photo:
+            #         logger.info("Получено фото")
+            #         file_path = await event.message.download_media(file="photo.jpg")
+            #         with open(file_path, "rb") as f:
+            #             await bot.send_photo(chat_id=DESTINATION_CHAT_ID, photo=f)
+            #         os.remove(file_path)
+            #         logger.info(f"Фото отправлено в чат {DESTINATION_CHAT_ID}")
+            #     elif event.message.video:
+            #         logger.info("Получено видео")
+            #         file_path = await event.message.download_media(file="video.mp4")
+            #         with open(file_path, "rb") as f:
+            #             await bot.send_video(chat_id=DESTINATION_CHAT_ID, video=f)
+            #         os.remove(file_path)
+            #         logger.info(f"Видео отправлено в чат {DESTINATION_CHAT_ID}")
+            #     elif event.message.document:
+            #         logger.info("Получен документ")
+            #         file_path = await event.message.download_media(file="document")
+            #         with open(file_path, "rb") as f:
+            #             await bot.send_document(chat_id=DESTINATION_CHAT_ID, document=f)
+            #         os.remove(file_path)
+            #         logger.info(f"Документ отправлено в чат {DESTINATION_CHAT_ID}")
             break
         except FloodWaitError as e:
             logger.error(f"Ограничение Telegram API, ждем {e.seconds} секунд")
