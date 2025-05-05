@@ -8,6 +8,7 @@ from telegram import Bot
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError, ChatWriteForbiddenError, SessionPasswordNeededError
 from telethon.network import ConnectionTcpFull
+from telethon.tl.types import MessageEntityTextUrl
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -52,6 +53,8 @@ if not PHONE.startswith("+"):
 # Инициализация бота
 bot = Bot(token=BOT_TOKEN)
 
+# Словарь для хранения соответствия ID исходных и пересланных сообщений
+message_mapping = {}
 
 # Проверка валидности токена
 async def validate_bot_token():
@@ -68,9 +71,8 @@ async def check_bot_permissions():
         await bot.send_message(chat_id=DESTINATION_CHAT_ID, text="Бот запущен и проверяет права...")
         logger.info(f"Бот успешно отправил тестовое сообщение в чат {DESTINATION_CHAT_ID}")
     except Exception as e:
-        logger.error(f"Бот не может отправить сообщение в чат {DESTINATION_CHAT_ID}:{e}")
+        logger.error(f"Бот не может отправить сообщение в чат {DESTINATION_CHAT_ID}: {e}")
         exit(1)
-
 
 # Инициализация клиента Telethon
 client = TelegramClient(
@@ -80,39 +82,86 @@ client = TelegramClient(
     connection=ConnectionTcpFull,
 )
 
-# Функция для очистки реферальных ссылок
+# Функция для очистки текста от ссылок и лишних строк
 def clean_referral_links(text):
     """
-    Очищает текст от всех ссылок в различных форматах (Markdown, голые URL, HTML).
-    Удаляет любые URL, включая те, что не содержат явных реферальных параметров.
+    Очищает текст от всех ссылок и лишних строк.
+    Извлекает чистый Trading Pair (например, GORKUSDT), удаляя домены и параметры.
     """
     if not text:
         logger.debug("Пустой текст, пропускаем обработку")
         return text
 
     try:
-        # 1. Markdown-ссылки: [текст](URL) — удаляем любые URL
-        markdown_pattern = r'\[([^\]]*)\]\((https?://[^\s\)]*?)[#\)]?'
-        text = re.sub(markdown_pattern, r'\1', text, flags=re.IGNORECASE)
+        # Разбиваем текст на строки
+        lines = text.split('\n')
+        filtered_lines = []
 
-        # 2. Голые URL: https://example.com/... — удаляем любые URL
-        raw_url_pattern = r'(https?://[^\s]*?)[#]?'
-        text = re.sub(raw_url_pattern, '', text, flags=re.IGNORECASE)
+        # Оставляем только строки с Token, Exchange, Trading Pair
+        for line in lines:
+            if 'Token:' in line or 'Exchange:' in line or 'Trading Pair:' in line:
+                filtered_lines.append(line)
 
-        # 3. HTML-ссылки: <a href="URL">текст</a> — удаляем любые URL
-        html_pattern = r'<a\s+href="(https?://[^\s"]*?)"[^>]*>([^<]*)</a>'
-        text = re.sub(html_pattern, r'\2', text, flags=re.IGNORECASE)
+        text = '\n'.join(filtered_lines)
+
+        # Извлекаем Trading Pair
+        trading_pair_match = re.search(r'Trading Pair:\s*([A-Z0-9_-]+)', text, re.IGNORECASE)
+        trading_pair = trading_pair_match.group(1) if trading_pair_match else None
+
+        # Удаляем ссылки, сохраняя только монету в Trading Pair
+        def replace_urls(match):
+            url = match.group(0)
+            if trading_pair:
+                logger.info(f"Сохранена монета в Trading Pair: {trading_pair}")
+                return f'Trading Pair: {trading_pair}'
+            logger.info(f"Удалена ссылка: {url}")
+            return ''
+
+        # Шаблон для удаления ссылок, охватывающий все указанные случаи
+        url_pattern = r'(https?://[^\s]+|\w+\.[^\s]+/(?:trade|exchange|spot)/[A-Z0-9_-]+(?:\?[^/]+)?|\w+\.[^\s]+/\w+-\w+\?[^/]+|\w+\.[^\s]+/\w+-\w+|\w+\.[^\s]+/\w+_\w+\?[^/]+|\w+\.[^\s]+/\w+_\w+|\w+\.[^\s]+/\w+\?[^/]+|\w+\.[^\s]+/\w+|\?ref=\w+|\?affiliate_id=\w+|\?inviteCode=\w+|\?rcode=\w+|\?from=referral&clacCode=\w+|\?channelId=\w+)'
+        text = re.sub(url_pattern, replace_urls, text, flags=re.IGNORECASE)
+
+        # Удаляем пустые строки
+        text = '\n'.join(line for line in text.split('\n') if line.strip())
 
         # Логирование результата
         if text == text:
-            logger.debug("Ссылки не найдены")
+            logger.debug("Ссылки и лишние строки не найдены в тексте")
         else:
-            logger.info("Ссылки удалены")
-
-        return text
+            logger.info("Ссылки и/или лишние строки удалены")
 
     except Exception as e:
-        logger.error(f"Ошибка при очистке ссылок: {e}")
+        logger.error(f"Ошибка в clean_referral_links: {e}")
+
+    return text
+
+# Функция для проверки и замены ссылок в entities
+def remove_entities_links(message):
+    """
+    Проверяет ссылки, встроенные в сообщение через entities, и заменяет их на текст.
+    """
+    text = message.text
+    if not text or not message.entities:
+        logger.debug("Сообщение без entities или текста")
+        return text
+
+    try:
+        new_text = text
+        entities = sorted(message.entities, key=lambda e: e.offset, reverse=True)
+        for entity in entities:
+            if isinstance(entity, MessageEntityTextUrl):
+                entity_text = text[entity.offset:entity.offset + entity.length]
+                logger.info(f"Найдена ссылка в entities: {entity_text} → {entity.url}")
+                trading_pair_match = re.search(r'Trading Pair:\s*([A-Z0-9_-]+)', text, re.IGNORECASE)
+                if trading_pair_match and entity_text == trading_pair_match.group(1):
+                    logger.info(f"Замена ссылки в Trading Pair на текст: {entity_text}")
+                    new_text = new_text[:entity.offset] + entity_text + new_text[entity.offset + entity.length:]
+                else:
+                    new_text = new_text[:entity.offset] + entity_text + new_text[entity.offset + entity.length:]
+        return new_text
+
+    except Exception as e:
+        logger.error(f"Ошибка при обработке entities: {e}")
         return text
 
 # Обработчик новых сообщений
@@ -120,36 +169,25 @@ def clean_referral_links(text):
 async def handler(event):
     logger.info(
         f"Новое сообщение в канале, ID: {event.message.id}, Тип: {type(event.message.media).__name__ if event.message.media else 'Text'}")
+    logger.debug(f"Сырой текст сообщения: {event.message.text}")
     for attempt in range(3):
         try:
             if event.message.text:
-                # Очищаем текст от реферальных ссылок
-                cleaned_text = clean_referral_links(event.message.text)
-                logger.info(f"Получено текстовое сообщение: {cleaned_text}")
-                await bot.send_message(chat_id=DESTINATION_CHAT_ID, text=cleaned_text, parse_mode=None)
-                logger.info(f"Сообщение отправлено в чат {DESTINATION_CHAT_ID}")
-            # if event.message.media:
-            #     if event.message.photo:
-            #         logger.info("Получено фото")
-            #         file_path = await event.message.download_media(file="photo.jpg")
-            #         with open(file_path, "rb") as f:
-            #             await bot.send_photo(chat_id=DESTINATION_CHAT_ID, photo=f)
-            #         os.remove(file_path)
-            #         logger.info(f"Фото отправлено в чат {DESTINATION_CHAT_ID}")
-            #     elif event.message.video:
-            #         logger.info("Получено видео")
-            #         file_path = await event.message.download_media(file="video.mp4")
-            #         with open(file_path, "rb") as f:
-            #             await bot.send_video(chat_id=DESTINATION_CHAT_ID, video=f)
-            #         os.remove(file_path)
-            #         logger.info(f"Видео отправлено в чат {DESTINATION_CHAT_ID}")
-            #     elif event.message.document:
-            #         logger.info("Получен документ")
-            #         file_path = await event.message.download_media(file="document")
-            #         with open(file_path, "rb") as f:
-            #             await bot.send_document(chat_id=DESTINATION_CHAT_ID, document=f)
-            #         os.remove(file_path)
-            #         logger.info(f"Документ отправлено в чат {DESTINATION_CHAT_ID}")
+                # Проверяем и заменяем ссылки в entities
+                text_without_entities = remove_entities_links(event.message)
+                # Очищаем текст от ссылок и лишних строк
+                cleaned_text = clean_referral_links(text_without_entities)
+                if cleaned_text:
+                    logger.info(f"Пересылаем очищенное сообщение: {cleaned_text}")
+                    # Пересылаем очищенное сообщение
+                    sent_message = await bot.send_message(chat_id=DESTINATION_CHAT_ID, text=cleaned_text, parse_mode=None)
+                    logger.info(f"Сообщение отправлено в чат {DESTINATION_CHAT_ID}, ID: {sent_message.message_id}")
+                    # Сохраняем соответствие ID исходного и пересланного сообщения
+                    message_mapping[event.message.id] = sent_message.message_id
+                else:
+                    logger.warning("После очистки текст пустой, сообщение не пересылается")
+            else:
+                logger.debug("Сообщение без текста, пропускаем")
             break
         except FloodWaitError as e:
             logger.error(f"Ограничение Telegram API, ждем {e.seconds} секунд")
@@ -160,6 +198,46 @@ async def handler(event):
             break
         except Exception as e:
             logger.error(f"Ошибка на попытке {attempt + 1}: {e}")
+            if attempt == 2:
+                await bot.send_message(chat_id=DESTINATION_CHAT_ID, text=f"Ошибка в боте: {e}")
+            await asyncio.sleep(1)
+
+# Обработчик редактирования сообщений
+@client.on(events.MessageEdited(chats=CHANNEL_ID))
+async def edit_handler(event):
+    logger.info(f"Сообщение отредактировано в канале, ID: {event.message.id}")
+    logger.debug(f"Сырой текст отредактированного сообщения: {event.message.text}")
+    for attempt in range(3):
+        try:
+            if event.message.id in message_mapping:
+                forwarded_message_id = message_mapping[event.message.id]
+                text_without_entities = remove_entities_links(event.message)
+                cleaned_text = clean_referral_links(text_without_entities)
+                if cleaned_text:
+                    logger.info(f"Обновляем сообщение в целевом чате: {cleaned_text}")
+                    await bot.edit_message_text(
+                        chat_id=DESTINATION_CHAT_ID,
+                        message_id=forwarded_message_id,
+                        text=cleaned_text,
+                        parse_mode=None
+                    )
+                    logger.info(f"Сообщение в чате {DESTINATION_CHAT_ID} обновлено, ID: {forwarded_message_id}")
+                else:
+                    logger.warning("После очистки текст пустой, удаляем сообщение")
+                    await bot.delete_message(chat_id=DESTINATION_CHAT_ID, message_id=forwarded_message_id)
+                    del message_mapping[event.message.id]
+            else:
+                logger.debug(f"Сообщение {event.message.id} не было пересылано ранее")
+            break
+        except FloodWaitError as e:
+            logger.error(f"Ограничение Telegram API, ждем {e.seconds} секунд")
+            await asyncio.sleep(e.seconds + 5)
+            continue
+        except ChatWriteForbiddenError:
+            logger.error(f"Бот не имеет прав писать в чат {DESTINATION_CHAT_ID}")
+            break
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении сообщения на попытке {attempt + 1}: {e}")
             if attempt == 2:
                 await bot.send_message(chat_id=DESTINATION_CHAT_ID, text=f"Ошибка в боте: {e}")
             await asyncio.sleep(1)
@@ -176,24 +254,27 @@ async def main():
 
     if not await client.is_user_authorized():
         try:
+            logger.info("Клиент не авторизован, запрашиваем код...")
             sent_code = await client.send_code_request(PHONE)
             code = input("Введите код авторизации: ").strip()
             await client.sign_in(PHONE, code)
+            logger.info("Клиент успешно авторизован")
         except SessionPasswordNeededError:
             password = input("Введите пароль двухфакторной аутентификации: ").strip()
             await client.sign_in(password=password)
+            logger.info("Клиент успешно авторизован с двухфакторной аутентификацией")
         except Exception as e:
             logger.error(f"Ошибка авторизации: {e}")
             return
 
-    # Проверка доступа к каналу
     try:
         channel = await client.get_entity(CHANNEL_ID)
-        logger.info(f"Канал {channel.title} успешно найден.")
+        logger.info(f"Канал {channel.title} успешно найден. ID: {CHANNEL_ID}")
     except Exception as e:
         logger.error(f"Не удалось получить доступ к каналу {CHANNEL_ID}: {e}")
         return
 
+    logger.info("Бот запущен и ожидает сообщений...")
     await client.run_until_disconnected()
 
 # Перезапуск при сбоях
