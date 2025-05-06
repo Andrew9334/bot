@@ -86,7 +86,7 @@ client = TelegramClient(
 def clean_referral_links(text):
     """
     Очищает текст от всех ссылок и лишних строк.
-    Извлекает чистый Trading Pair (например, GORKUSDT), удаляя домены и параметры.
+    Извлекает чистый Trading Pair (например, GORKUSDT), удаляя домены, параметры, круглые и квадратные скобки.
     """
     if not text:
         logger.debug("Пустой текст, пропускаем обработку")
@@ -100,6 +100,9 @@ def clean_referral_links(text):
         # Оставляем только строки с Token, Exchange, Trading Pair
         for line in lines:
             if 'Token:' in line or 'Exchange:' in line or 'Trading Pair:' in line:
+                # Удаляем содержимое в круглых и квадратных скобках для Trading Pair
+                if 'Trading Pair:' in line:
+                    line = re.sub(r'\s*(\([^()]*\)|[[^\[\]]*])', '', line)  # Удаляем всё в круглых и квадратных скобках
                 filtered_lines.append(line)
 
         text = '\n'.join(filtered_lines)
@@ -177,15 +180,17 @@ async def handler(event):
                 text_without_entities = remove_entities_links(event.message)
                 # Очищаем текст от ссылок и лишних строк
                 cleaned_text = clean_referral_links(text_without_entities)
-                if cleaned_text:
-                    logger.info(f"Пересылаем очищенное сообщение: {cleaned_text}")
-                    # Пересылаем очищенное сообщение
-                    sent_message = await bot.send_message(chat_id=DESTINATION_CHAT_ID, text=cleaned_text, parse_mode=None)
-                    logger.info(f"Сообщение отправлено в чат {DESTINATION_CHAT_ID}, ID: {sent_message.message_id}")
-                    # Сохраняем соответствие ID исходного и пересланного сообщения
-                    message_mapping[event.message.id] = sent_message.message_id
+                # Пересылаем только если есть Trading Pair
+                if 'Trading Pair:' in cleaned_text:
+                    if cleaned_text:
+                        logger.info(f"Пересылаем очищенное сообщение: {cleaned_text}")
+                        # Пересылаем очищенное сообщение
+                        sent_message = await bot.send_message(chat_id=DESTINATION_CHAT_ID, text=cleaned_text, parse_mode=None)
+                        logger.info(f"Сообщение отправлено в чат {DESTINATION_CHAT_ID}, ID: {sent_message.message_id}")
+                        # Сохраняем соответствие ID исходного и пересланного сообщения
+                        message_mapping[event.message.id] = sent_message.message_id
                 else:
-                    logger.warning("После очистки текст пустой, сообщение не пересылается")
+                    logger.info(f"Сообщение не содержит Trading Pair, пропускаем: {cleaned_text}")
             else:
                 logger.debug("Сообщение без текста, пропускаем")
             break
@@ -213,19 +218,22 @@ async def edit_handler(event):
                 forwarded_message_id = message_mapping[event.message.id]
                 text_without_entities = remove_entities_links(event.message)
                 cleaned_text = clean_referral_links(text_without_entities)
-                if cleaned_text:
-                    logger.info(f"Обновляем сообщение в целевом чате: {cleaned_text}")
-                    await bot.edit_message_text(
-                        chat_id=DESTINATION_CHAT_ID,
-                        message_id=forwarded_message_id,
-                        text=cleaned_text,
-                        parse_mode=None
-                    )
-                    logger.info(f"Сообщение в чате {DESTINATION_CHAT_ID} обновлено, ID: {forwarded_message_id}")
+                if 'Trading Pair:' in cleaned_text:
+                    if cleaned_text:
+                        logger.info(f"Обновляем сообщение в целевом чате: {cleaned_text}")
+                        await bot.edit_message_text(
+                            chat_id=DESTINATION_CHAT_ID,
+                            message_id=forwarded_message_id,
+                            text=cleaned_text,
+                            parse_mode=None
+                        )
+                        logger.info(f"Сообщение в чате {DESTINATION_CHAT_ID} обновлено, ID: {forwarded_message_id}")
+                    else:
+                        logger.warning("После очистки текст пустой, удаляем сообщение")
+                        await bot.delete_message(chat_id=DESTINATION_CHAT_ID, message_id=forwarded_message_id)
+                        del message_mapping[event.message.id]
                 else:
-                    logger.warning("После очистки текст пустой, удаляем сообщение")
-                    await bot.delete_message(chat_id=DESTINATION_CHAT_ID, message_id=forwarded_message_id)
-                    del message_mapping[event.message.id]
+                    logger.info(f"Отредактированное сообщение не содержит Trading Pair, пропускаем")
             else:
                 logger.debug(f"Сообщение {event.message.id} не было пересылано ранее")
             break
